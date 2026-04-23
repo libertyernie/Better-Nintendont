@@ -80,6 +80,17 @@ The poke commands are quite useful, they are built into a list that's cached to 
 Gecko codes rely on PADRead and OSSleepThread to work and that makes some scenarios impossible for codes to work, this is one of the reasons why my method is necessary for making certain mods.
 
 
+# Things to note
+
+While this is based on version 5.482, it merges most of the useful changes from later.
+
+BBA support was notably left out since I have no use for it. DRC (Wii U Gamepad) is also out, but can be compiled back easily.
+
+Nunchuk support has been completely removed.
+
+This isn't intended to replace Nintendont, it is not my focus. The compatibility fixes are available to anyone, but going forward, the patching system will be crucial for my mods, so this standalone release will continue to be useful.
+
+
 # Why is this a hard fork?
 
 For convenience, and the main project seems to be considered inactive anyway.
