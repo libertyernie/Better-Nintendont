@@ -75,6 +75,10 @@ The following functions are possible:
 
 Look at the included patch.txt for more examples, if you put a patch.txt file in the apps/gc_devo/ folder it will affect every game unless they already have their own specific patch.txt file.
 
+The poke commands are quite useful, they are built into a list that's cached to MEM2. Before the game starts, the patches are applied, if the game loads an executable, the patches will re-apply.
+
+Gecko codes rely on PADRead and OSSleepThread to work and that makes some scenarios impossible for codes to work, this is one of the reasons why my method is necessary for making certain mods.
+
 
 # Why is this a hard fork?
 
