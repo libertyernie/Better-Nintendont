@@ -38,7 +38,7 @@
 
 enum GameRegion
 {
-	JAP=0,
+	JPN=0,
 	USA,
 	EUR,
 	KOR,
