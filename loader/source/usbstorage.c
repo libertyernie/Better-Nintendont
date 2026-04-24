@@ -90,7 +90,7 @@ distribution.
 #define INVALID_LUN					-2
 
 #define MAX_TRANSFER_SIZE_V0		4096
-#define MAX_TRANSFER_SIZE_V5		(16*1024)
+#define MAX_TRANSFER_SIZE_V5		(4*1024)
 
 #define DEVLIST_MAXSIZE    			8
 

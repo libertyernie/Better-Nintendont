@@ -26,21 +26,21 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "ff_utf8.h"
 #include "wdvd.h"
 
-static const char CARD_NAME_GP1[] = "/saves/GP1.bin";
-static const char CARD_NAME_GP2[] = "/saves/GP2.bin";
-static const char CARD_NAME_GP2J[] = "/saves/GP2J.bin";
-static const char CARD_NAME_AX[] = "/saves/AX.bin";
+static const char CARD_NAME_GP1[] = "/apps/gc_devo/GP1.bin";
+static const char CARD_NAME_GP2[] = "/apps/gc_devo/GP2.bin";
+static const char CARD_NAME_GP2J[] = "/apps/gc_devo/GP2J.bin";
+static const char CARD_NAME_AX[] = "/apps/gc_devo/AX.bin";
 
-static const char SETTINGS_AX_RVC[] = "/saves/AX_RVCsettings.bin";
-static const char SETTINGS_AX_RVD[] = "/saves/AX_RVDsettings.bin";
-static const char SETTINGS_AX_RVE[] = "/saves/AX_RVEsettings.bin";
-static const char SETTINGS_YAKRVB[] = "/saves/YAKRVBsettings.bin";
-static const char SETTINGS_YAKRVC[] = "/saves/YAKRVCsettings.bin";
-static const char SETTINGS_VS3V02[] = "/saves/VS3V02settings.bin";
-static const char SETTINGS_VS4JAP[] = "/saves/VS4JAPsettings.bin";
-static const char SETTINGS_VS4EXP[] = "/saves/VS4EXPsettings.bin";
-static const char SETTINGS_VS4V06JAP[] = "/saves/VS4V06JAPsettings.bin";
-static const char SETTINGS_VS4V06EXP[] = "/saves/VS4V06EXPsettings.bin";
+static const char SETTINGS_AX_RVC[] = "/apps/gc_devo/AX_RVCsettings.bin";
+static const char SETTINGS_AX_RVD[] = "/apps/gc_devo/AX_RVDsettings.bin";
+static const char SETTINGS_AX_RVE[] = "/apps/gc_devo/AX_RVEsettings.bin";
+static const char SETTINGS_YAKRVB[] = "/apps/gc_devo/YAKRVBsettings.bin";
+static const char SETTINGS_YAKRVC[] = "/apps/gc_devo/YAKRVCsettings.bin";
+static const char SETTINGS_VS3V02[] = "/apps/gc_devo/VS3V02settings.bin";
+static const char SETTINGS_VS4JAP[] = "/apps/gc_devo/VS4JPNsettings.bin";
+static const char SETTINGS_VS4EXP[] = "/apps/gc_devo/VS4EXPsettings.bin";
+static const char SETTINGS_VS4V06JAP[] = "/apps/gc_devo/VS4V06JPNsettings.bin";
+static const char SETTINGS_VS4V06EXP[] = "/apps/gc_devo/VS4V06EXPsettings.bin";
 
 extern bool wiiVCInternal;
 

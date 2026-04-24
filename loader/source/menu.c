@@ -878,16 +878,13 @@ static const char *const *GetSettingsDescription(const MenuCtx *ctx)
 
 			case NIN_CFG_BIT_REMLIMIT: {
 				static const char *desc_remlimit[] = {
-					"Disc read speed is normally",
-					"limited to the performance of",
-					"the original GameCube disc",
-					"drive.",
+					"Disc read speed emulation",
+					"is an attempt to use the",
+					"original GameCube disc drive speed",
+					"but it makes loading times much slower.",
 					"",
-					"Unlocking read speed can allow",
-					"for faster load times, but it",
-					"can cause problems with games",
-					"that are extremely sensitive",
-					"to disc read timing.",
+					"Unlocking read speed is very",
+					"recommended for any game.",
 					NULL
 				};
 				return desc_remlimit;
@@ -973,9 +970,7 @@ static const char *const *GetSettingsDescription(const MenuCtx *ctx)
 					"Default size for new memory",
 					"card images.",
 					"",
-					"NOTE: Sizes larger than 251",
-					"blocks are known to cause",
-					"issues.",
+					"",
 					NULL
 				};
 				return desc_memcard_blocks;
@@ -999,18 +994,15 @@ static const char *const *GetSettingsDescription(const MenuCtx *ctx)
 
 			case NIN_SETTINGS_NATIVE_SI: {
 				static const char *desc_native_si[] = {
-					"Native Control allows use of",
-					"GBA link cables on original",
+					"Native Control enables",
+					"GBA link support on original",
 					"Wii systems.",
 					"",
 					"NOTE: Enabling Native Control",
 					"will disable Bluetooth and",
-					"USB HID controllers.",
+					"USB controllers.",
 					"",
-					"This option is not available",
-					"on Wii U, since it does not",
-					"have built-in GameCube",
-					"controller ports.",
+					"",
 					NULL
 				};
 				return desc_native_si;
@@ -1079,7 +1071,7 @@ static bool UpdateSettingsMenu(MenuCtx *ctx)
 	if(FPAD_X(0))
 	{
 		// Start the updater.
-		UpdateNintendont();
+	//	UpdateNintendont();
 		ctx->redraw = 1;
 	}
 
@@ -2029,11 +2021,16 @@ void PrintLoadKernelError(LoadKernelError_t iosErr, int err)
 		case LKERR_IOS_Open_IOS58_kernel:
 			PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*5, "IOS_Open(IOS58 kernel) returned %d.", err);
 			PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*7, "WARNING: IOS58 may be corrupted.");
+			PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*8, "It's no use! Saifogeo won't work!");
+			PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*10, "CHAJIRU SAIFODON!!");
 			break;
 
 		case LKERR_IOS_Read_IOS58_kernel:
 			PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*5, "IOS_Read(IOS58 kernel) returned %d.", err);
 			PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*7, "WARNING: IOS58 may be corrupted.");
+			PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*9, "Sagashita koe ga kikoete kureba Chiisana yume ga kagayaki ni naru Hohoemi ni sono hikari Itsuka te wo nobashiteku");
+			PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*11, "TODOKETE Setsunasa ni wa namae o tsukeyou ka Snow Halation");
+			PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*14, "Amar, sentir Son cosas que no tengo si no existes tu Si me haces ver el cielo siempre más azul Y empiezo a comprender a toda plenitud Lo que es morir en vida Cuando tu me abrazas Que acaba el mundo Que no pasa nada si estás tú");
 			break;
 	}
 }

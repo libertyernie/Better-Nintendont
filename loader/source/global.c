@@ -418,12 +418,12 @@ void UpdateNinCFG()
 {
 	if (ncfg->Version == 2)
 	{	//251 blocks, used to be there
-		ncfg->Unused = 0x2;
+		ncfg->SkipProgAsk = 0x2;
 		ncfg->Version = 3;
 	}
 	if (ncfg->Version == 3)
 	{	//new memcard setting space
-		ncfg->MemCardBlocks = ncfg->Unused;
+		ncfg->MemCardBlocks = ncfg->SkipProgAsk;
 		ncfg->VideoScale = 0;
 		ncfg->VideoOffset = 0;
 		ncfg->Version = 4;

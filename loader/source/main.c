@@ -47,6 +47,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "TRI.h"
 #include "Config.h"
 #include "wdvd.h"
+#include "b64/cdecode.h"
+#include "vi_encoder.h"
 
 #include "ff_utf8.h"
 #include "diskio.h"
@@ -61,6 +63,14 @@ extern syssram* __SYS_LockSram();
 extern u32 __SYS_UnlockSram(u32 write);
 extern u32 __SYS_SyncSram(void);
 
+static u8 patchID[8] = {0};
+static u8 playlog_name[0x2B] = {0}; //can be larger, but the playlog's can't
+static u8 useCustom = 0;
+
+static u32 jingle = 0;
+
+static u8 multAddr = 0;
+
 #define STATUS			((void*)0x90004100)
 #define STATUS_LOADING	(*(volatile unsigned int*)(0x90004100))
 #define STATUS_SECTOR	(*(volatile unsigned int*)(0x90004100 + 8))
@@ -74,6 +84,846 @@ extern u32 __SYS_SyncSram(void);
 #define IOCTL_ExecSuspendScheduler	1
 
 static GXRModeObj *vmode = NULL;
+
+//Playlog stuff
+#define ALIGN32(x) (((x) + 31) & ~31)
+#define SECONDS_TO_2000 946684800LL
+#define TICKS_PER_SECOND 60750000LL
+
+//! Should be 32 byte aligned
+static const char PLAYRECPATH[] ATTRIBUTE_ALIGN(32) = "/title/00000001/00000002/data/play_rec.dat";
+
+typedef struct _PlayRec
+{
+	u32 checksum;
+	union
+	{
+		u32 data[31];
+		struct
+		{
+			u16 name[42];
+			u64 ticks_boot;
+			u64 ticks_last;
+			char title_id[6];
+			char unknown[18];
+		} ATTRIBUTE_PACKED;
+	};
+} PlayRec;
+
+static u64 getWiiTime(void)
+{
+	time_t uTime = time(NULL);
+	return TICKS_PER_SECOND * (uTime - SECONDS_TO_2000);
+}
+
+int Playlog_Set(void)
+{
+	if(ncfg->SkipPlaylog)
+		return -1;
+
+	s32 res = -1;
+	//u32 sum = 0;
+	u8 i;
+
+	// open play_rec.dat
+	s32 fd = IOS_Open(PLAYRECPATH, IPC_OPEN_RW);
+	if(fd < 0)
+		return fd;
+
+	PlayRec * playrec_buf = memalign(32, ALIGN32(sizeof(PlayRec)));
+	if(!playrec_buf)
+		goto cleanup;
+
+	// read play_rec.dat
+	if(IOS_Read(fd, playrec_buf, sizeof(PlayRec)) != sizeof(PlayRec))
+		goto cleanup;
+
+	if(IOS_Seek(fd, 0, 0) < 0)
+		goto cleanup;
+
+#if 0
+	// determine if the internal name should be used
+	bool isEqual = true;
+	u16 hbcTitle[16] = {0x48,0x6F,0x6D,0x65,0x62,0x72,0x65,0x77,0x20,0x43,0x68,0x61,0x6E,0x6E,0x65,0x6C};
+	for(i = 0; i < 16; i++) {
+		if(playrec_buf->name[i] != hbcTitle[i]) {
+			isEqual = false;
+			break;
+		}
+	}
+#endif
+
+	//if(isEqual || useCustom) {
+	{
+		// convert string to wchar
+		for(i = 0; i < 42; i++)
+			playrec_buf->name[i] = playlog_name[i];
+
+		//only 21 characters per line in the message board log
+#if 0
+		//this should do it, it's intended to correct the internal title
+		if(playrec_buf->name[0x15] != 0 && !useCustom) { //means second line is used
+			int copy = 0;
+			int find = 0;
+			for(find = 0x15; find > 1; --find) {
+				if(playrec_buf->name[find] == 0x20) {
+					//need to copy to the 2nd line
+					for(copy = find; copy < 0x15; ++copy)
+						playrec_buf->name[copy] = 0x20;
+					
+					for(copy = 0; copy < 0x15; ++copy)
+						playrec_buf->name[0x15 + copy] = playlog_name[find + copy + 1];
+					
+					break;
+				}
+			}
+		}
+#endif
+		// update boot time
+		u64 stime = getWiiTime();
+		playrec_buf->ticks_boot = stime;
+
+		// calc checksum
+		//for(i = 0; i < 31; i++)
+			//sum += playrec_buf->data[i];
+
+		// If a crash occurs, next sysmenu load will use wrong info,
+		// this prevents that from happening
+		playrec_buf->checksum = 0;
+
+		if(IOS_Write(fd, playrec_buf, sizeof(PlayRec)) != sizeof(PlayRec))
+			goto cleanup;
+
+		res = 0;
+	}
+
+cleanup:
+	free(playrec_buf);
+	IOS_Close(fd);
+	return res;
+}
+
+void ConvertName(u8* name, u8 pos, u32 val)
+{
+	name[pos]   = val >> 24;
+	name[pos+1] = val >> 16;
+	name[pos+2] = val >> 8;
+	name[pos+3] = val;
+}
+
+#if 1
+// Perhaps not the most ideal but this should solve conflicts between global and per-game
+static bool patchOnce = false;
+
+static void app_loadgameconfig(u8 *tempgameconf, u32 tempgameconfsize)
+{
+	if(patchOnce)
+		return;
+
+	u32 ret;
+	s32 gameidmatch, maxgameidmatch = -1, maxgameidmatch2 = -1;
+	u32 i, parsebufpos;
+	u32 codeaddr, codeval, start, end, pos; //codeoffset (searchNpoke)
+	u32 codeaddr2, codeval2; //for pokeifequal
+	char nameStr1[0x16];
+	char nameStr2[0x16];
+	u32 n1 = 0, n2 = 0, n3 = 0, n4 = 0, n5 = 0, n6 = 0, n7 = 0, n8 = 0, n9 = 0, n10 = 0; //to allow greater control
+	patchOnce = true;
+	
+	//u32 temp, tempoffset = 0; //searchNpoke
+	char parsebuffer[18];
+	u32 patch_count = 0;
+	u32 patch_address = 0x92000004;
+	vu32* patch_cntAddr = (vu32*)0x92000000;
+	u32 memIncrement = 0;
+	
+	const char *discid = (const char *)patchID; //just a copy of gameid6
+	
+	for (maxgameidmatch = 0; maxgameidmatch <= 6; maxgameidmatch++)
+	{
+		i = 0;
+		while (i < tempgameconfsize)
+		{
+			maxgameidmatch2 = -1;
+			while (maxgameidmatch != maxgameidmatch2)
+			{
+				while (i != tempgameconfsize && tempgameconf[i] != ':')
+					i++;
+				if (i == tempgameconfsize)
+					break;
+				while ((tempgameconf[i] != 10 && tempgameconf[i] != 13) && (i != 0))
+					i--;
+				if (i != 0)
+					i++;
+				parsebufpos = 0;
+				gameidmatch = 0;
+				while (tempgameconf[i] != ':')
+				{
+					if (tempgameconf[i] == '?')
+					{
+						parsebuffer[parsebufpos] = discid[parsebufpos];
+						parsebufpos++;
+						gameidmatch--;
+						i++;
+					}
+					else if (tempgameconf[i] != 0 && tempgameconf[i] != ' ')
+						parsebuffer[parsebufpos++] = tempgameconf[i++];
+					else if (tempgameconf[i] == ' ')
+						break;
+					else
+						i++;
+					if (parsebufpos == 8)
+						break;
+				}
+				parsebuffer[parsebufpos] = 0;
+				if (strncasecmp("DEFAULT", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 7)
+				{
+					gameidmatch = 0;
+					goto idmatch;
+				}
+				if (strncasecmp(discid, parsebuffer, strlen(parsebuffer)) == 0)
+				{
+					gameidmatch += strlen(parsebuffer);
+				idmatch:
+					if (gameidmatch > maxgameidmatch2)
+						maxgameidmatch2 = gameidmatch;
+				}
+				while ((i != tempgameconfsize) && (tempgameconf[i] != 10 && tempgameconf[i] != 13))
+					i++;
+			}
+			while (i != tempgameconfsize && tempgameconf[i] != ':')
+			{
+				parsebufpos = 0;
+				while ((i != tempgameconfsize) && (tempgameconf[i] != 10 && tempgameconf[i] != 13))
+				{
+					if (tempgameconf[i] != 0 && tempgameconf[i] != ' ' && tempgameconf[i] != '(' && tempgameconf[i] != ':')
+						parsebuffer[parsebufpos++] = tempgameconf[i++];
+					else if (tempgameconf[i] == ' ' || tempgameconf[i] == '(' || tempgameconf[i] == ':')
+						break;
+					else
+						i++;
+					if (parsebufpos == 17)
+						break;
+				}
+				parsebuffer[parsebufpos] = 0;
+				//if (!autobootcheck)
+				{
+					if (strncasecmp("poke", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 4)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x , %x", (unsigned int *)&codeaddr, (unsigned int *)&codeval);
+						if (ret == 2)
+						{
+							codeaddr &= 0x0FFFFFFF;
+							memcpy((void*)patch_address+memIncrement, &codeaddr, 4);
+							memIncrement += 4;
+							memcpy((void*)patch_address+memIncrement, &codeval, 4);
+							
+							//DCFlushRange((void*)patch_address+memIncrement-4, 8);
+							
+							memIncrement += 4;
+							++patch_count;
+						}
+					}
+					if (strncasecmp("pokeifequal", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 11)
+					{
+						ret = sscanf((char *)(tempgameconf + i), "( %x , %x , %x , %x", (unsigned int *)&codeaddr, (unsigned int *)&codeval, (unsigned int *)&codeaddr2, (unsigned int *)&codeval2);
+						if (ret == 4)
+						{
+							//this won't work if the dol hasn't loaded yet
+						//	if(*(u32*)codeaddr == codeval) {
+								
+								// What this does is copy the condition with the address tweaked
+								// since all writes need to be 32-bit aligned, we can identify any
+								// unaligned addresses as conditions in the kernel.
+								// Doing this allows patching games like Zelda MQ and Sonic Gems.
+								
+								codeaddr &= 0x0FFFFFFF;
+								codeaddr |= 1;
+								memcpy((void*)patch_address+memIncrement, &codeaddr, 4);
+								memIncrement += 4;
+								memcpy((void*)patch_address+memIncrement, &codeval, 4);
+								memIncrement += 4;
+								++patch_count; // necessary for loop
+								
+								codeaddr2 &= 0x0FFFFFFF;
+								memcpy((void*)patch_address+memIncrement, &codeaddr2, 4);
+								memIncrement += 4;
+								memcpy((void*)patch_address+memIncrement, &codeval2, 4);
+								//DCFlushRange((void*)patch_address+memIncrement-4, 8);
+								memIncrement += 4;
+								++patch_count;
+						//	}
+						}
+					}
+					if (strncasecmp("rand", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 4)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x , %x , %x , %x , %x", (unsigned int *)&codeaddr, (unsigned int *)&start, (unsigned int *)&end, (unsigned int *)&pos, (unsigned int *)&codeval);
+						if (ret == 5)
+						{
+							//rand(801A5084, u32 start, u32 end, u8 pos, u32 initial_value)
+							
+							//first set the address
+							codeaddr &= 0x0FFFFFFF;
+							memcpy((void*)patch_address+memIncrement, &codeaddr, 4);
+							memIncrement += 4;
+							
+							//secure some values
+							if(start >= end) {
+								start = 0;
+								end = 1;
+							}
+							
+							u8 size = 0;
+							if(end <= 0xFFFF)
+								size = 16;
+							if(end <= 0xFF)
+								size = 24;
+							
+							//if(pos > 3)
+							//	pos = 0;
+							
+							u32 rval = rand() % (end + 1 - start) + start;
+							
+							if(!size) { // u32
+								codeval = rval;
+							}
+							else if(size == 16) {
+								if(pos == 1) {
+									codeval &= 0xFFFF;
+									codeval |= rval << size;
+								} else {
+									codeval &= 0xFFFF0000;
+									codeval |= rval;
+								}
+							}
+							else if(size == 24) { //u8
+								if(pos == 1) {
+									codeval &= 0xFFFFFF;
+									codeval |= rval << size;
+								}
+								else if(pos == 2) {
+									codeval &= 0xFF00FFFF;
+									codeval |= rval << 16;
+								}
+								else if(pos == 3) {
+									codeval &= 0xFFFF00FF;
+									codeval |= rval << 8;
+								}
+								else {
+									codeval &= 0xFFFFFF00;
+									codeval |= rval;
+								}
+							}
+							
+							memcpy((void*)patch_address+memIncrement, &codeval, 4);
+							//DCFlushRange((void*)patch_address+memIncrement-4, 8);
+							
+							memIncrement += 4;
+							++patch_count;
+						}
+					}
+					if (strncasecmp("triArcade", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 9)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x ", (unsigned int *)&codeval);
+						if (ret == 1)
+						{
+							// triArcade allows recycling the triforce setting to enable patches,
+							// this way there's no need to add more settings support to ext loaders
+							if(codeval > 0 && !(ncfg->Config & NIN_CFG_ARCADE_MODE))
+								goto end;
+						}
+					}
+					if (strncasecmp("noLoadStub", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 10)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x ", (unsigned int *)&codeval);
+						if (ret == 1)
+						{
+							// this changes the stubhaxx name, allowing internal stub to load sysmenu
+							// advantage, is that it will use burn-in reduction to blackout the screen
+							// because the native blackout code tends to show garbage when loading sysmenu
+							//if(codeval > 0 && *(vu32*)0xC0001804 == 0x53545542) { //stubhaxx
+							if(codeval > 0) {
+								//*(vu32*)0x93003438 = 1;
+								//DCFlushRange((void *)0x93003438, 4);
+								
+								codeaddr = 0x13003438;
+								codeval = 1;
+								memcpy((void*)patch_address+memIncrement, &codeaddr, 4);
+								memIncrement += 4;
+								memcpy((void*)patch_address+memIncrement, &codeval, 4);
+								memIncrement += 4;
+								++patch_count;
+							}
+						}
+					}
+					if (strncasecmp("noVidpatch", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 10)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x ", (unsigned int *)&codeval);
+						if (ret == 1)
+						{
+							// quick remove all video patches
+							if(codeval > 0) {
+								ncfg->VideoScale = 0;
+								ncfg->VideoOffset = 0;
+								ncfg->Config &= ~NIN_CFG_FORCE_PROG;
+								ncfg->VideoMode &= ~NIN_VID_FORCE;
+								ncfg->VideoMode &= ~NIN_VID_FORCE_MASK;
+								ncfg->VideoMode &= ~NIN_VID_MASK;
+								ncfg->VideoMode |= NIN_VID_AUTO;
+							}
+						}
+					}
+					if (strncasecmp("noProgAsk", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 9)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x ", (unsigned int *)&codeval);
+						if (ret == 1)
+						{
+							// for emulated and real SRAM, prevents prog scan ask screen
+							if(codeval > 0) {
+								//ncfg->VideoMode &= ~NIN_VID_PROG;
+								ncfg->SkipProgAsk = 1;
+							}
+						}
+					}
+					if (strncasecmp("iplJingle", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 9)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x ", (unsigned int *)&codeval);
+						if (ret == 1)
+						{
+							// 1=kid, 2=kabuki, 3 and higher = random
+							if(codeval > 0) {
+								jingle = codeval;
+								if(codeval > 2)
+									jingle = rand() % (2 + 1 - 0) + 0;
+							} else
+								jingle = 0;
+						}
+					}
+					if (strncasecmp("noTrapFilter", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 12)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x ", (unsigned int *)&codeval);
+						if (ret == 1)
+						{
+							// not much use for this, but AGB emulator can use this to avoid some flicker
+							// because deflicker or 240p is not available
+							if(codeval > 0) {
+								VIDEO_SetTrapFilter(0);
+							}
+						}
+					}
+					if (strncasecmp("volume", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 6)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x ", (unsigned int *)&codeval);
+						if (ret == 1)
+						{
+							// Ultimate Spider-Man has very low volume
+							if(codeval > 0 && codeval < 0x100) {
+								VIWriteI2CRegister8(0x71, codeval);
+								VIWriteI2CRegister8(0x72, codeval);
+							}
+						}
+					}
+					if (strncasecmp("ccDirect", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 8)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x ", (unsigned int *)&codeval);
+						if (ret == 1)
+						{
+							// Direct button mapping, less confusing
+							if(codeval > 0) {
+								//set mem2 bool
+								vu32* CCdirect = (vu32*)0x93003074;
+								*CCdirect = 1;
+							}
+						}
+					}
+					if (strncasecmp("wiiChan", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 7)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x ", (unsigned int *)&codeval);
+						if (ret == 1)
+						{
+							vu32* wiiController = (vu32*)0x932F0090; // wiimote controller bool
+							vu32* wiiOverride = (vu32*)0x932F0094;
+							vu32* wiiChan = (vu32*)0x932F0098; // wiimote channel to use
+							
+							// 0 = auto slot assign
+							if(codeval == 0) {
+								*wiiController = 1;
+							} else if(codeval < 5) {
+								*wiiController = 1; // prefer wiimote to connect
+								*wiiOverride = 1; // but also override port 1 if a gc controller is inserted
+								*wiiChan = codeval; // and use codeval as the slot number!
+								*wiiChan -= 1;
+							}
+							DCFlushRange((void*)0x932F0090, 0xC);
+						}
+					}
+					if (strncasecmp("mcdDelay", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 8)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x ", (unsigned int *)&codeval);
+						if (ret == 1)
+						{
+							//override mcd access delay
+							//devo has no delay, but a few official titles
+							//can't handle it correctly such as JPN Zelda Wind Waker
+							
+							//for most titles no delay should work
+							//0:no delay
+							ncfg->CardDelay = codeval;
+						}
+					}
+					if (strncasecmp("writePlaylog", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 12)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x , %s , %s", (unsigned int *)&codeval,
+																		nameStr1, nameStr2);
+						if (ret == 3)
+						{
+							if(codeval != 0)
+								ncfg->SkipPlaylog = 0;
+							
+							int chr1 = 0;
+							int chr2 = 0;
+							
+							//fix spaces 1
+							for(chr1 = 0; chr1 < (sizeof(nameStr1)-1); chr1++) {
+								if(nameStr1[chr1] == 0x5F) // _
+									nameStr1[chr1] = 0x20;
+							}
+							if(nameStr1[0] != 0x30 && nameStr1[1] != 0) {
+								for(chr1 = 0; chr1 < (sizeof(nameStr1)-1); chr1++) {
+									playlog_name[chr1] = nameStr1[chr1];
+									if(playlog_name[chr1] == 0)
+										break;
+								}
+								if(chr1 > 1)
+									useCustom = 1;
+							}
+							
+							//fix spaces 2
+							for(chr2 = 0; chr2 < (sizeof(nameStr2)-1); chr2++) {
+								if(nameStr2[chr2] == 0x5F) // _
+									nameStr2[chr2] = 0x20;
+							}
+							
+							if(nameStr2[0] != 0x30 && nameStr2[1] != 0 && useCustom) {
+								//shouldn't use linebreaks because it tracks the number of characters
+							/*	if(playlog_name[chr1] == 0) {
+									playlog_name[chr1] = 0x0A;
+									++chr1;
+								}*/
+								
+								//pad line 1 null space with space (devo behavior)
+								//however official VC for A Link to the Past uses 00
+							//	for(chr1 = chr1; chr1 < 0x15; ++chr1)
+							//		playlog_name[chr1] = 0x20;
+								
+								for(chr2 = 0; chr2 < (sizeof(nameStr2)-1); chr2++) {
+									//playlog_name[chr1 + chr2] = nameStr2[chr2];
+									playlog_name[0x15 + chr2] = nameStr2[chr2];
+									if(nameStr2[chr2] == 0)
+										break;
+								}
+							}
+						}
+					}
+					if (strncasecmp("hexPlaylog", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 10)
+					{
+						ret = sscanf((char *)tempgameconf + i, "( %x , %x , %x , %x , %x , %x , %x , %x , %x , %x , %x",
+										(unsigned int *)&codeval, (unsigned int *)&n1, (unsigned int *)&n2, (unsigned int *)&n3,
+										(unsigned int *)&n4, (unsigned int *)&n5, (unsigned int *)&n6, (unsigned int *)&n7,
+										(unsigned int *)&n8, (unsigned int *)&n9, (unsigned int *)&n10);
+						if (ret == 11)
+						{
+							if(codeval != 0)
+								ncfg->SkipPlaylog = 0; //prevents any writing to play_rec.dat
+							
+							if(n1 != 0) {
+								useCustom = 1;
+								
+								//gonna do it the hard way
+								
+								ConvertName(&playlog_name[0], 0,   n1);
+								ConvertName(&playlog_name[0], 4,   n2);
+								ConvertName(&playlog_name[0], 8,   n3);
+								ConvertName(&playlog_name[0], 12,  n4);
+								ConvertName(&playlog_name[0], 16,  n5);
+								ConvertName(&playlog_name[0], 20,  n6);
+								ConvertName(&playlog_name[0], 24,  n7);
+								ConvertName(&playlog_name[0], 28,  n8);
+								ConvertName(&playlog_name[0], 32,  n9);
+								ConvertName(&playlog_name[0], 36, n10);
+							}
+						}
+					}
+				}
+				if (tempgameconf[i] != ':')
+				{
+					while ((i != tempgameconfsize) && (tempgameconf[i] != 10 && tempgameconf[i] != 13))
+						i++;
+					if (i != tempgameconfsize)
+						i++;
+				}
+			}
+			if (i != tempgameconfsize)
+				while ((tempgameconf[i] != 10 && tempgameconf[i] != 13) && (i != 0))
+					i--;
+		}
+	}
+
+goto end;
+
+end:
+	if(patch_count) {
+		//gotta be careful the global patch.txt doesn't break the current code list
+		*patch_cntAddr = patch_count;
+		DCFlushRange((void *)0x92000000, 4);
+		
+		DCFlushRange((void *)0x92000004, patch_count*8);
+		
+	/*	PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*20, "PATCHED: %d codes.", *patch_cntAddr);
+		UpdateScreen();
+		VIDEO_WaitVSync();
+		usleep(500000); */
+	}
+}
+#endif
+
+void SetFilePatches(void)
+{
+#if 0 // TEST: changes Sonic Mega Collection text from 'Game Title' to 'Game Reset'
+	vu32* patch_cntAddr = (vu32*)0x92000000; //amount of writes
+	vu32* patch_1 = (vu32*)0x92000004; //addr
+	vu32* patch_2 = (vu32*)0x92000008; //val
+	vu32* patch_3 = (vu32*)0x9200000C;
+	vu32* patch_4 = (vu32*)0x92000010;
+
+	*patch_cntAddr = 2;
+	*patch_1 = 0x002406CC;
+	*patch_2 = 0x20526573;
+	*patch_3 = 0x002406D0;
+	*patch_4 = 0x65740000;
+	return;
+#endif
+	
+	//first set patch count to 0 regardless of using patch or not
+	//because the spot comes with some data
+	vu32* patch_cntAddr = (vu32*)0x92000000; //amount of writes
+	*patch_cntAddr = 0;
+	
+	//TODO: check for extracted fst format
+	char cheatPath[255];
+	snprintf(cheatPath, sizeof(cheatPath), "%s:%s", GetRootDevice(), ncfg->GamePath);
+	u32 i;
+	//const char* DiscName = (const char *)patchID;
+	//search the string backwards for '/'
+	for (i = strlen(cheatPath); i > 0; --i)
+	{
+		if( cheatPath[i] == '/' )
+			break;
+	}
+	i++;
+	//memcpy(cheatPath, DiscName, i);
+	snprintf(cheatPath+i, sizeof(cheatPath), "patch.bin");
+	
+	FIL CodeFD;
+	if( f_open_char( &CodeFD, cheatPath, FA_READ|FA_OPEN_EXISTING ) == FR_OK )
+	{
+		if( CodeFD.obj.objsize > 6*1024*1024 )
+		{
+			;//dbgprintf("Patch:File is too large, can't be larger than 2 MB!\r\n");
+		}
+		else
+		{
+			void *patchbuf = (void*)0x92000000;
+			UINT read;
+			f_read(&CodeFD, patchbuf, CodeFD.obj.objsize, &read);
+		}
+		f_close( &CodeFD );
+	}
+	else
+	{
+		snprintf(cheatPath+i, sizeof(cheatPath), "patch.txt");
+		if( f_open_char( &CodeFD, cheatPath, FA_READ|FA_OPEN_EXISTING ) == FR_OK )
+		{
+			if( CodeFD.obj.objsize > 6*1024*1024 )
+			{
+				;//dbgprintf("Patch:File is too large, can't be larger than 2 MB!\r\n");
+			}
+			else
+			{
+				u8 *CMem = memalign(32, CodeFD.obj.objsize);
+				u32 read;
+				f_read(&CodeFD, CMem, CodeFD.obj.objsize, &read);
+				
+				u32 numnonascii = 0;
+				for (i = 0; i < CodeFD.obj.objsize; i++)
+				{
+					if (CMem[i] < 9 || CMem[i] > 126)
+						numnonascii++;
+					else
+						CMem[i - numnonascii] = CMem[i];
+				}
+				CodeFD.obj.objsize -= numnonascii;
+				
+				app_loadgameconfig(CMem, CodeFD.obj.objsize);
+				free( CMem );
+			}
+			f_close( &CodeFD );
+		}
+	}
+	
+	// Check for global patch.txt in apps/gc_devo/patch.txt
+	// this can be used to make every game use the kabuki jingle for example
+#if 1
+	snprintf(cheatPath, sizeof(cheatPath), "%s:%s", GetRootDevice(), "/apps/gc_devo/patch.txt");
+	if( f_open_char( &CodeFD, cheatPath, FA_READ|FA_OPEN_EXISTING ) == FR_OK )
+	{
+		if( CodeFD.obj.objsize < 1*1024*1024 )
+		{
+			u8 *CMem = memalign(32, CodeFD.obj.objsize);
+			u32 read;
+			f_read(&CodeFD, CMem, CodeFD.obj.objsize, &read);
+			u32 numnonascii = 0;
+			for (i = 0; i < CodeFD.obj.objsize; i++)
+			{
+				if (CMem[i] < 9 || CMem[i] > 126)
+					numnonascii++;
+				else
+					CMem[i - numnonascii] = CMem[i];
+			}
+			CodeFD.obj.objsize -= numnonascii;
+			
+			app_loadgameconfig(CMem, CodeFD.obj.objsize);
+			free( CMem );
+		}
+		f_close( &CodeFD );
+	}
+#endif
+}
+
+void SMC_ROM(void)
+{
+	if(strncmp((const char *)patchID, "GSOE", 4))
+		return;
+	
+	char cheatPath[255];
+	snprintf(cheatPath, sizeof(cheatPath), "%s:%s", GetRootDevice(), ncfg->GamePath);
+	u32 i;
+	//const char* DiscName = (const char *)patchID;
+	//search the string backwards for '/'
+	for (i = strlen(cheatPath); i > 0; --i)
+	{
+		if( cheatPath[i] == '/' )
+			break;
+	}
+	i++;
+	//memcpy(cheatPath, DiscName, i);
+	*(u32*)0x91200000 = 0;
+	snprintf(cheatPath+i, sizeof(cheatPath), "rom.bin");
+	FIL f;
+	if( f_open_char( &f, cheatPath, FA_READ|FA_OPEN_EXISTING ) == FR_OK )
+	{
+		if( f.obj.objsize > 4*1024*1024 )
+		{
+			;//dbgprintf("Patch:File is too large, can't be larger than 4 MB!\r\n");
+		}
+		else
+		{
+			*(u32*)0x91200000 = f.obj.objsize;
+			void *patchbuf = (void*)0x91200010;
+			UINT read;
+			f_read(&f, patchbuf, f.obj.objsize, &read); //up to 0x400000
+		}
+		f_close( &f );
+	}
+}
+
+static char SMC_TITLES[14][16] =
+{
+	"meanbean.bin",
+	"flicky.bin",
+	"bluesphere.bin",
+	"ksonic2.bin",
+	"sonic3k.bin",
+	"ristar.bin",
+	"sonic1.bin",
+	"sonic2.bin",
+	"sonic3.bin",
+	"sonic3d.bin",
+	"spinball.bin",
+	"sandk.bin",
+	"sonic1j.bin", //unused by game
+	"sonic1u.bin"
+};
+
+void SMC_ScanROM(u8 title)
+{
+	if(strncmp((const char *)patchID, "GSOE", 4))
+		return;
+	
+	vu32* patch_cntAddr = (vu32*)0x92000000; //amount of writes
+	
+	if(title < 1) {
+		vu32* patch_1 = (vu32*)0x92000004;
+		vu32* patch_2 = (vu32*)0x92000008;
+		*patch_1 = 0x002AF0EC; //this is breaking mcd... why?
+	//	*patch_1 = 0x012000FC; //dummy write just to pad the codes below
+		*patch_2 = 0x00600000;
+		
+		*patch_cntAddr += 1;
+	}
+	
+	char cheatPath[255];
+	snprintf(cheatPath, sizeof(cheatPath), "%s:%s", GetRootDevice(), ncfg->GamePath);
+	u32 i;
+	//const char* DiscName = (const char *)patchID;
+	//search the string backwards for '/'
+	for (i = strlen(cheatPath); i > 0; --i)
+	{
+		if( cheatPath[i] == '/' )
+			break;
+	}
+	i++;
+	//memcpy(cheatPath, DiscName, i);
+	//*(u32*)0x91200000 = 0;
+	snprintf(cheatPath+i, sizeof(cheatPath), SMC_TITLES[title]);
+	FIL f;
+	if( f_open_char( &f, cheatPath, FA_READ|FA_OPEN_EXISTING ) == FR_OK )
+	{
+		if( f.obj.objsize > 4*1024*1024 )
+		{
+			;//dbgprintf("Patch:File is too large, can't be larger than 4 MB!\r\n");
+		}
+		else
+		{
+			//*(u32*)0x91200000 = f.obj.objsize;
+			//found ROM, record file sizes in unused MEM1
+				
+				//these need to bve converted into mem2 patches
+			//	vu32* patch_1 = (vu32*)(0x802AF0D0 + (title*4));
+			//	*patch_1 = f.obj.objsize;
+				
+				// now we need to make the title ristar
+			//	vu32* patch_2 = (vu32*)(0x80254CA8 + (title*8));
+			//	*patch_2 = 0x802288CC;
+				
+				
+				vu32* patch_1 = (vu32*)(0x9200000C + (multAddr * 0x10)); //addr
+				vu32* patch_2 = (vu32*)(0x92000010 + (multAddr * 0x10)); //val
+				vu32* patch_3 = (vu32*)(0x92000014 + (multAddr * 0x10));
+				vu32* patch_4 = (vu32*)(0x92000018 + (multAddr * 0x10));
+				
+				*patch_1 = 0x002AF0C4 + (title*4);
+				*patch_2 = f.obj.objsize;
+				*patch_3 = 0x00254CA8 + (title*8);
+				*patch_4 = 0x802288CC; //confusing isn't it?
+				
+				*patch_cntAddr += 2;
+				++multAddr;
+			//}
+		}
+		f_close( &f );
+	}
+}
 
 static unsigned char ESBootPatch[] =
 {
@@ -150,10 +1000,9 @@ static void updateMetaXml(void)
 		"\t<name>" META_NAME "</name>\r\n"
 		"\t<coder>" META_AUTHOR "</coder>\r\n"
 		"\t<version>%d.%d%s</version>\r\n"
-		"\t<release_date>20160710000000</release_date>\r\n"
+		"\t<release_date>2023</release_date>\r\n"
 		"\t<short_description>" META_SHORT "</short_description>\r\n"
 		"\t<long_description>" META_LONG1 "\r\n\r\n" META_LONG2 "</long_description>\r\n"
-		"\t<no_ios_reload/>\r\n"
 		"\t<ahb_access/>\r\n"
 		"</app>\r\n",
 		NIN_VERSION >> 16, NIN_VERSION & 0xFFFF,
@@ -192,7 +1041,7 @@ static void updateMetaXml(void)
 
 	// File does not exist, or file is not identical.
 	// Write the new meta.xml.
-	if (f_open_char(&meta, filepath, FA_WRITE|FA_CREATE_ALWAYS) == FR_OK)
+/*	if (f_open_char(&meta, filepath, FA_WRITE|FA_CREATE_ALWAYS) == FR_OK)
 	{
 		// Reserve space in the file.
 		if (f_size(&meta) < len) {
@@ -204,7 +1053,7 @@ static void updateMetaXml(void)
 		f_write(&meta, new_meta, len, &wrote);
 		f_close(&meta);
 		FlushDevices();
-	}
+	} */
 }
 
 static const WCHAR *primaryDevice;
@@ -255,6 +1104,51 @@ static u32 CheckForMultiGameAndRegion(u32 CurDICMD, u32 *ISOShift, u32 *BI2regio
 				free(MultiHdr);
 				return 1;
 			}
+			
+			// Get internal title from game image
+			if(!wiiVCInternal) {
+				//for patch.txt
+				//f_read(&f, patchID, 0x6, &read);
+				
+				//reads the internal title, fast but not good
+				//f_lseek(&f, 0x20);
+				//f_read(&f, playlog_name, 0x2A, &read);
+				
+				// Find short name from opening.bnr
+				unsigned fstPos = 0;
+				//unsigned fstSize = 0;
+				unsigned fstEntries = 0;
+				f_lseek(&f, 0x424);
+				f_read(&f, &fstPos, 4, &read);
+				//f_read(&f, &fstSize, 4, &read);
+				if(fstPos) {
+					int i;
+					f_lseek(&f, fstPos + 8);
+					f_read(&f, &fstEntries, 4, &read);
+					
+					for(i = 1; i < fstEntries; ++i) {
+						int isDir = 0;
+						char entryName[16] = {0};
+						f_lseek(&f, fstPos + (i*0xC));
+						f_read(&f, &isDir, 4, &read);
+						if((isDir & 0xF000000) == 0x1000000)
+							continue;
+						
+						f_lseek(&f, fstPos + (fstEntries * 0xC) + isDir);
+						f_read(&f, &entryName, 11, &read);
+						if(strncmp(entryName, "opening.bnr", 11) == 0) {
+							f_lseek(&f, fstPos + (i*0xC) + 4);
+							f_read(&f, &fstPos, 4, &read);
+							
+							// Short title
+							f_lseek(&f, fstPos + 0x1820);
+							f_read(&f, &playlog_name, 0x20, &read);
+							break;
+						}
+					}
+				}
+				f_lseek(&f, 0);
+			}
 		}
 		if(wiiVCInternal)
 			read = WDVD_FST_Read(MultiHdr, 0x800);
@@ -270,6 +1164,13 @@ static u32 CheckForMultiGameAndRegion(u32 CurDICMD, u32 *ISOShift, u32 *BI2regio
 			free(MultiHdr);
 			return 2;
 		}
+
+		// For patch.txt
+		memcpy(patchID, MultiHdr, 6);
+
+		// So autoboot doesn't require providing ID
+		if(ncfg->Config & NIN_CFG_AUTO_BOOT)
+			memcpy(&ncfg->GameID, MultiHdr, 4);
 
 		// Check for CISO magic with 2 MB block size.
 		// NOTE: CISO block size is little-endian.
@@ -340,6 +1241,29 @@ static u32 CheckForMultiGameAndRegion(u32 CurDICMD, u32 *ISOShift, u32 *BI2regio
 		if (read != 48)
 		{
 			// Could not read bi2.bin.
+			free(MultiHdr);
+			return 5;
+		}
+
+		// Get the internal title from boot.bin
+		snprintf(GamePath, sizeof(GamePath), "%s:%ssys/boot.bin", GetRootDevice(), ncfg->GamePath);
+		fres = f_open_char(&f, GamePath, FA_READ|FA_OPEN_EXISTING);
+		if (fres != FR_OK)
+		{
+			// Error opening boot.bin.
+			free(MultiHdr);
+			return 4;
+		}
+		
+		// For patch.txt
+		f_read(&f, patchID, 0x6, &read);
+		
+		f_lseek(&f, 0x20);
+		f_read(&f, playlog_name, 0x2A, &read);
+		f_close(&f);
+		if (read != 0x2A)
+		{
+			// Could not read boot.bin.
 			free(MultiHdr);
 			return 5;
 		}
@@ -566,9 +1490,67 @@ int main(int argc, char **argv)
 
 	memset((void*)ncfg, 0, sizeof(NIN_CFG));
 	bool argsboot = false;
+	bool base64args = false;
 	if(argc > 1) //every 0x00 gets counted as one arg so just make sure its more than the path and copy
 	{
-		memcpy(ncfg, argv[1], sizeof(NIN_CFG));
+		if (strncmp("AQcM", argv[1], 4) == 0) {
+ 			// argv[1] is a base64 encoded string
+ 			base64args = true;
+ 			void* decode_buffer = malloc(strlen(argv[1]) * 6 / 8 + 1);
+ 			if (decode_buffer)
+ 			{
+ 				base64_decodestate state;
+ 				base64_init_decodestate(&state);
+ 				base64_decode_block(argv[1], strlen(argv[1]), decode_buffer, &state);
+ 				memcpy(ncfg, decode_buffer, sizeof(NIN_CFG));
+ 				free(decode_buffer);
+ 			}
+ 		}
+		else if(strncmp("sd:/", argv[1], 4) == 0 || strncmp("usb:/", argv[1], 5) == 0) {
+			// build the config
+			ncfg->Magicbytes = 0x01070CF6;
+			ncfg->Version = NIN_CFG_VERSION;
+			
+		//	(void)"/games/Animal Crossing [GAFE01]/game.iso";
+			
+			if(argv[1][0] == 'u') {
+				ncfg->Config |= NIN_CFG_USB;
+				snprintf(ncfg->GamePath, sizeof(ncfg->GamePath), "%s", &argv[1][4]);
+			} else
+				snprintf(ncfg->GamePath, sizeof(ncfg->GamePath), "%s", &argv[1][3]);
+			
+			ncfg->Config |= NIN_CFG_MEMCARDEMU;
+			ncfg->Config |= NIN_CFG_MC_MULTI;
+			ncfg->MemCardBlocks = 2;
+			
+			if(argc > 2) {
+				if(strncmp("--cheats", argv[2], 8) == 0)
+					ncfg->Config |= NIN_CFG_CHEATS;
+			}
+			if(argc > 3) {
+				if(strncmp("--noIPL", argv[3], 7) == 0)
+					ncfg->Config |= NIN_CFG_SKIP_IPL;
+			}
+			if(argc > 4) {
+				if(strncmp("--mcd", argv[4], 5) == 0) {
+					ncfg->Config &= ~NIN_CFG_MC_MULTI;
+					ncfg->MemCardBlocks = 0;
+				}
+			}
+			
+			ncfg->Config |= NIN_CFG_ARCADE_MODE;
+			ncfg->Config |= NIN_CFG_REMLIMIT;
+			ncfg->Config |= NIN_CFG_AUTO_BOOT;
+			ncfg->VideoMode |= NIN_VID_AUTO;
+			ncfg->Language |= NIN_LAN_AUTO;
+			ncfg->MaxPads = NIN_CFG_MAXPAD;
+			//ncfg->GameID = ; // this is set already
+			//ncfg->Config |= NIN_CFG_LOG;
+ 		}
+		else
+ 		{
+ 			memcpy(ncfg, argv[1], sizeof(NIN_CFG));
+ 		}
 		UpdateNinCFG(); //support for old versions with this
 		if(ncfg->Magicbytes == 0x01070CF6 && ncfg->Version == NIN_CFG_VERSION && ncfg->MaxPads <= NIN_CFG_MAXPAD)
 		{
@@ -771,8 +1753,13 @@ int main(int argc, char **argv)
 	// Initialize controllers.
 	// FIXME: Initialize before storage devices.
 	// Doing that right now causes usbstorage to fail...
+	//if(!(ncfg->Config & NIN_CFG_AUTO_BOOT)) {
 	FPAD_Init();
 	FPAD_Update();
+	
+	s8 hoffset = 0;
+	if (CONF_GetDisplayOffsetH(&hoffset) == 0)
+		ncfg->SramOffset = hoffset;
 
 	/* Read IPL Font before doing any patches */
 	void *fontbuffer = memalign(32, 0x50000);
@@ -783,12 +1770,15 @@ int main(int argc, char **argv)
 	//gprintf("Font: 0x1AFF00 starts with %.4s, 0x1FCF00 with %.4s\n", (char*)0x93100000, (char*)0x93100000 + 0x4D000);
 
 	// Update meta.xml.
-	updateMetaXml();
+	if (argsboot == false || base64args == false)
+	{
+		updateMetaXml();
+	}
 
 	if(argsboot == false)
 	{
 		// Load titles.txt.
-		LoadTitles();
+	//	LoadTitles();
 
 		if (LoadNinCFG() == false)
 		{
@@ -802,7 +1792,7 @@ int main(int argc, char **argv)
 		}
 
 		// Prevent autobooting if B is pressed
-		int i = 0;
+		/*int i = 0;
 		while((ncfg->Config & NIN_CFG_AUTO_BOOT) && i < 1000000) // wait for wiimote re-synch
 		{
 			if (i == 0) {
@@ -820,7 +1810,7 @@ int main(int argc, char **argv)
 			}
 
 			i++;
-		}
+		}*/
 	}
 	ReconfigVideo(rmode);
 	UseSD = (ncfg->Config & NIN_CFG_USB) == 0;
@@ -1053,11 +2043,11 @@ int main(int argc, char **argv)
 		// Memory card emulation is enabled.
 		// Set up the memory card file.
 		char BasePath[20];
-		snprintf(BasePath, sizeof(BasePath), "%s:/saves", GetRootDevice());
+		snprintf(BasePath, sizeof(BasePath), "%s:/apps/gc_devo", GetRootDevice());
 		f_mkdir_char(BasePath);
 
-		char MemCardName[8];
-		memset(MemCardName, 0, 8);
+		char MemCardName[10];
+		memset(MemCardName, 0, 10);
 		if ( ncfg->Config & NIN_CFG_MC_MULTI )
 		{
 			// "Multi" mode is enabled.
@@ -1069,13 +2059,13 @@ int main(int argc, char **argv)
 				case BI2_REGION_SOUTH_KOREA:
 				default:
 					// JPN games.
-					memcpy(MemCardName, "ninmemj", 7);
+					memcpy(MemCardName, "memcard_j", 9);
 					break;
 
 				case BI2_REGION_USA:
 				case BI2_REGION_PAL:
 					// USA/PAL games.
-					memcpy(MemCardName, "ninmem", 6);
+					memcpy(MemCardName, "memcard", 7);
 					break;
 			}
 		}
@@ -1086,7 +2076,7 @@ int main(int argc, char **argv)
 		}
 
 		char MemCard[32];
-		snprintf(MemCard, sizeof(MemCard), "%s/%s.raw", BasePath, MemCardName);
+		snprintf(MemCard, sizeof(MemCard), "%s/%s.bin", BasePath, MemCardName);
 		gprintf("Using %s as Memory Card.\r\n", MemCard);
 		FIL f;
 		if (f_open_char(&f, MemCard, FA_READ|FA_OPEN_EXISTING) != FR_OK)
@@ -1115,6 +2105,14 @@ int main(int argc, char **argv)
 		while(!__SYS_SyncSram());
 	}
 
+	WPAD_Disconnect(0);
+	WPAD_Disconnect(1);
+	WPAD_Disconnect(2);
+	WPAD_Disconnect(3);
+
+	WUPC_Shutdown();
+	WPAD_Shutdown();
+
 	#define GCN_IPL_SIZE 2097152
 	#define TRI_IPL_SIZE 1048576
 	void *iplbuf = NULL;
@@ -1133,24 +2131,29 @@ int main(int argc, char **argv)
 			// Attempt to load the GameCube IPL.
 			char iplchar[32];
 			iplchar[0] = 0;
+			
+			//screw the rules, one ipl to rule them all
+			snprintf(iplchar, sizeof(iplchar), "%s:/apps/gc_devo/ipl.bin", GetRootDevice());
+#if 0
 			switch (BI2region)
 			{
 				case BI2_REGION_USA:
-					snprintf(iplchar, sizeof(iplchar), "%s:/iplusa.bin", GetRootDevice());
+					snprintf(iplchar, sizeof(iplchar), "%s:/apps/gc_devo/ipl_u.bin", GetRootDevice());
 					break;
 
 				case BI2_REGION_JAPAN:
 				case BI2_REGION_SOUTH_KOREA:
 				default:
-					snprintf(iplchar, sizeof(iplchar), "%s:/ipljap.bin", GetRootDevice());
+					snprintf(iplchar, sizeof(iplchar), "%s:/apps/gc_devo/ipl_j.bin", GetRootDevice());
 					break;
 
 				case BI2_REGION_PAL:
 					// FIXME: PAL IPL is broken on Wii U.
 					if (!IsWiiU())
-						snprintf(iplchar, sizeof(iplchar), "%s:/iplpal.bin", GetRootDevice());
+						snprintf(iplchar, sizeof(iplchar), "%s:/apps/gc_devo/ipl_p.bin", GetRootDevice());
 					break;
 			}
+#endif
 
 			FIL f;
 			if (iplchar[0] != 0 &&
@@ -1170,7 +2173,7 @@ int main(int argc, char **argv)
 		{
 			// Attempt to load the Triforce IPL. (segaboot)
 			char iplchar[32];
-			snprintf(iplchar, sizeof(iplchar), "%s:/segaboot.bin", GetRootDevice());
+			snprintf(iplchar, sizeof(iplchar), "%s:/apps/gc_devo/segaboot.bin", GetRootDevice());
 			FIL f;
 			if (f_open_char(&f, iplchar, FA_READ|FA_OPEN_EXISTING) == FR_OK)
 			{
@@ -1181,22 +2184,69 @@ int main(int argc, char **argv)
 					UINT read;
 					f_read(&f, iplbuf, TRI_IPL_SIZE - 0x20, &read);
 					useipltri = (read == (TRI_IPL_SIZE - 0x20));
+					
+					//check for 480p
+					if(progressive) {
+						*(s16 *)(0x92A80000 + 0x824AA - 0x20) = 2; //NTSC 480p
+						*(s16 *)(0x92A80000 + 0x824BE - 0x20) = 0; //no field rendering
+						
+						//other video mode, unused?
+						//*(s16 *)(0x92A80000 + 0x8A202 - 0x20) = 2; //NTSC 480p
+						//*(s16 *)(0x92A80000 + 0x8A216 - 0x20) = 0; //no field rendering
+					}
+					//no deflicker
+					//if(sharp) {
+						//It normally has no deflicker, but you can change it here 
+					//	*(s16 *)(0x92A80000 + 0x824DA - 0x20) = 0;
+					//	*(u32 *)(0x92A80000 + 0x824DC - 0x20) = 0x15001500;
+					//	*(s16 *)(0x92A80000 + 0x824E0 - 0x20) = 0;
+						
+						//other mode, has df
+					//	*(s16 *)(0x92A80000 + 0x8A232 - 0x20) = 0;
+					//	*(u32 *)(0x92A80000 + 0x8A234 - 0x20) = 0x15161500;
+					//	*(s16 *)(0x92A80000 + 0x8A238 - 0x20) = 0;
+					//}
 				}
 				f_close(&f);
 			}
 		}
 	}
 
+	//Check for Sonic Mega Collection (NTSC-U)
+	//and load ROM.BIN from disk to MEM2 to replace Ristar
+//	SMC_ROM();
+	
+	//always 0 unless changed by filepatches
+	ncfg->SkipProgAsk = 0;
+	
+	//only write playlog if patch.txt says so
+	ncfg->SkipPlaylog = 1;
+	
+	//just needs to be higher than 4999
+	ncfg->CardDelay = 0xFFFF;
+	
+	//read patches from GAMEID.txt to mem2, which in patch.c will be applied to mem1
+	srand (time (0));
+	SetFilePatches();
+	
+	// More SMC stuff
+//	u8 sonic = 0;
+//	for(sonic = 0; sonic < 14; ++sonic)
+//		SMC_ScanROM(sonic);
+
+	// dump mem2 area
+/*	FIL CodeFD;
+	if( f_open_char( &CodeFD, "sd:/codes/mem2.bin", FA_WRITE|FA_CREATE_ALWAYS ) == FR_OK )
+	{
+		void *patchbuf = (void*)0x92000000;
+		
+		UINT wrote;
+		f_write(&CodeFD, patchbuf, 32*1024, &wrote);
+		f_close(&CodeFD);
+	}*/
+
 	//sync changes
 	CloseDevices();
-
-	WPAD_Disconnect(0);
-	WPAD_Disconnect(1);
-	WPAD_Disconnect(2);
-	WPAD_Disconnect(3);
-
-	WUPC_Shutdown();
-	WPAD_Shutdown();
 
 	if(wiiVCInternal)
 	{
@@ -1207,14 +2257,17 @@ int main(int argc, char **argv)
 	//before flushing do game specific patches
 	if(ncfg->Config & NIN_CFG_FORCE_PROG &&
 			ncfg->GameID == 0x47584745)
-	{	//Mega Man X Collection does progressive ingame so
-		//forcing it would mess with the interal game setup
+	{	//Mega Man X Collection does progressive in-game so
+		//forcing it would mess with the internal game setup
 		gprintf("Disabling Force Progressive for this game\r\n");
 		ncfg->Config &= ~NIN_CFG_FORCE_PROG;
 	}
 
 	//make sure the cfg gets to the kernel
 	DCStoreRange((void*)ncfg, sizeof(NIN_CFG));
+
+	//setup playlog if the file exists, boot time needs to be updated
+	Playlog_Set();
 
 //set current time
 	u32 bias = 0, cur_time = 0;
@@ -1377,8 +2430,8 @@ int main(int argc, char **argv)
 	u32 vidForce = (ncfg->VideoMode & NIN_VID_FORCE);
 	u32 vidForceMode = (ncfg->VideoMode & NIN_VID_FORCE_MASK);
 
-	progressive = (ncfg->Config & NIN_CFG_FORCE_PROG)
-		&& !useipl && !useipltri;
+	progressive = (ncfg->Config & NIN_CFG_FORCE_PROG) ;
+	//	&& !useipltri; //SUSO: removed !useipl
 
 	switch (BI2region)
 	{
@@ -1449,7 +2502,7 @@ int main(int argc, char **argv)
 	{
 		syssram *sram;
 		sram = __SYS_LockSram();
-		sram->display_offsetH = 0;	// Clear Offset
+		sram->display_offsetH = ncfg->SramOffset;	// Clear Offset
 		sram->flags		&= ~0x80;	// Clear Progmode
 		sram->flags		&= ~3;		// Clear Videomode
 
@@ -1477,7 +2530,7 @@ int main(int argc, char **argv)
 			// BMX XXX, since that game won't even boot on a real
 			// GameCube if a component cable is connected.
 			if ((ncfg->GameID >> 8) != 0x474233 && !spPopWW &&
-				(ncfg->VideoMode & NIN_VID_PROG))
+				(ncfg->VideoMode & NIN_VID_PROG) && !ncfg->SkipProgAsk)
 			{
 				sram->flags |= 0x80;
 			}
@@ -1566,7 +2619,29 @@ int main(int argc, char **argv)
 	write32(0x0d000004,0x22);
 	if(useipl)
 	{
-		load_ipl(iplbuf);
+		//Determine if bios should be sharp
+		bool sharp = false;
+		u32 VideoModeVal = ncfg->VideoMode & NIN_VID_MASK;
+		if(VideoModeVal == NIN_VID_FORCE)
+			sharp = true;
+		
+		// this is unfinished, I can't test anything beyond my setup
+		int tvtype = CONF_GetVideo();
+		if(progressive) {
+			if(tvtype == CONF_VIDEO_PAL)
+				tvtype = 0x16;
+			else
+				tvtype = 0x02;
+		} else {
+			if(tvtype == CONF_VIDEO_PAL)
+				tvtype = 0x14;
+			else if(tvtype == CONF_VIDEO_MPAL)
+				tvtype = 0x08;
+			else
+				tvtype = 0x00;
+		}
+		
+		load_ipl(iplbuf, progressive, sharp, jingle, tvtype);
 		*(vu32*)0xD3003420 = 0x5DEA;
 		while(*(vu32*)0xD3003420 == 0x5DEA) ;
 		/* Patches */
