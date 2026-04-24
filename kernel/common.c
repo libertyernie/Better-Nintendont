@@ -143,12 +143,17 @@ static const char stm_imm[] ALIGNED(32) = "/dev/stm/immediate";
 static u8 stm_in[0x20] ALIGNED(32);
 static u8 stm_out[0x20] ALIGNED(32);
 
-extern bool isWiiVC;
+//extern bool isWiiVC;
 void Shutdown( void )
 {
 	dbgprintf("Got Shutdown button call\n");
 	if( ConfigGetConfig(NIN_CFG_MEMCARDEMU) )
 		EXIShutdown();
+	
+	if(IsWiiU())
+		write32( 0x0D8005E0, 0xFFFFFFFE );
+
+	write32( HW_RESETS, (read32( HW_RESETS ) | 0x20 ) & (~1) );
 
 #if 0
 
