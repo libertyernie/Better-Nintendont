@@ -30,6 +30,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "lwbt/physbusif.h"
 #include "Config.h"
 
+static u32 nunTimer = 0; 
+static bool forceNun = false;
+
+static bool exit_now = false;
+
 extern int dbgprintf( const char *fmt, ...);
 
 static vu32 BTChannelsUsed = 0;
@@ -242,12 +247,12 @@ static s32 BTHandleData(void *arg,void *buffer,u16 len)
 		}
 		else
 		{
-			//use previous value. Currently does this automaticly but if someone decides to clear memory. 
+			//use previous value.
 		}
 
-		u32 prevButton = BTPad[chan].button;
+	//	u32 prevButton = BTPad[chan].button;
 		BTPad[chan].button = ((R16((u32)((u8*)buffer+1))) & 0x1F9F) | ((~(*(((u8*)buffer)+21))&0x03)<<5);
-		if((prevButton & WM_BUTTON_TWO) && BTPad[chan].button & WM_BUTTON_TWO)	//wiimote button TWO held down
+	/*	if((prevButton & WM_BUTTON_TWO) && BTPad[chan].button & WM_BUTTON_TWO)	//wiimote button TWO held down
 		{
 			switch (BTPad[chan].button & ~WM_BUTTON_TWO)
 			{
@@ -294,7 +299,12 @@ static s32 BTHandleData(void *arg,void *buffer,u16 len)
 			stat->controller = stat->controller & ~(C_NSWAP1 | C_NSWAP2 | C_NSWAP3 | C_SWAP | C_ISWAP | C_TestSWAP);
 			sync_after_write(arg, sizeof(struct BTPadStat));
 			sync_before_read(arg, sizeof(struct BTPadStat));
-		}
+		} */
+		
+		// activity check
+		if(BTPad[chan].button > 0)
+			stat->timeout = read32(HW_TIMER);
+			//dbgprintf("Pressed Wii btn TWO: 0x%X\n", BTPad[chan].button);
 
 		BTPad[chan].used = stat->controller;
 		sync_after_write(&BTPad[chan], sizeof(struct BTPadCont));
@@ -343,11 +353,35 @@ static s32 BTHandleData(void *arg,void *buffer,u16 len)
 			}
 		}
 	}
+	if(forceNun) // virtual nunchuk
+	{
+		const u32 ext_ctrl_id = 0xA4200000;
+		
+		if(ext_ctrl_id == 0xA4200000)
+		{
+			stat->controller = C_NUN;
+			//dbgprintf("Connected NUNCHUK\n");
+			u8 data[2];
+			data[0] = 0x13; //IR camera pixel clock
+			data[1] = 0x06; //enable IR pixel clock and return 0x22
+			bte_senddata(stat->sock,data,2);	//returns 0x22 Acknowledge output report and return function result
+			stat->transferstate = TRANSFER_ENABLE_IR_PIXEL_CLOCK;
+			sync_after_write(arg, sizeof(struct BTPadStat));
+			
+			// initial timer, go for 3 minutes of inactivity
+			stat->timeout = read32(HW_TIMER);
+			
+			if(nunTimer > 4) // 2 sometimes fails
+				forceNun = false;
+			++nunTimer;
+		}
+	}
 	else if(*(u8*)buffer == 0x21)	//read memory data
 	{
 		if(stat->transferstate == TRANSFER_GET_IDENT)
 		{
 			const u32 ext_ctrl_id = R32((u32)((u8*)buffer+8));
+			
 			if((ext_ctrl_id == 0xA4200101) ||	//CLASSIC_CONTROLLER
 			   (ext_ctrl_id == 0x90908f00) ||	//CLASSIC_CONTROLLER_NYKOWING
 			   (ext_ctrl_id == 0x9e9f9c00) ||	//CLASSIC_CONTROLLER_NYKOWING2
@@ -381,7 +415,7 @@ static s32 BTHandleData(void *arg,void *buffer,u16 len)
 			else if(ext_ctrl_id == 0xA4200000)
 			{
 				stat->controller = C_NUN;
-				//dbgprintf("Connected NUNCHUCK\n");
+				//dbgprintf("Connected NUNCHUK\n");
 				u8 data[2];
 				data[0] = 0x13; //IR camera pixel clock
 				data[1] = 0x06; //enable IR pixel clock and return 0x22
@@ -622,6 +656,9 @@ static s32 BTHandleConnect(void *arg,struct bte_pcb *pcb,u8 err)
 
 static s32 BTHandleDisconnect(void *arg,struct bte_pcb *pcb,u8 err)
 {
+	// idk why
+	//return ERR_OK;
+
 	//dbgprintf("Controller disconnected\n");
 	if(BTChannelsUsed) BTChannelsUsed--;
 	u32 i;
@@ -719,6 +756,15 @@ void BTInit(void)
 	/* Both Motor and Channel free */
 	memset((void*)BTMotor, 0, 0x20);
 	sync_after_write((void*)BTMotor, 0x20);
+	
+	// read config for starting in virtual wiimote mode
+	if(read32(0x132F0090) == 0x00000001) {
+		forceNun = true;
+		nunTimer = 0;
+	}
+	// correct this in case the value is invalid
+	if(read32(0x132F0098) > 3)
+		write32(0x132F0098, 0);
 
 	BTE_Init();
 	BTE_InitCore(BTInitCoreCB);
@@ -773,11 +819,28 @@ void BTUpdateRegisters(void)
 				}
 			}
 		}
-		else if(TimerDiffSeconds(BTPadConnected[i]->timeout) >= 20)
+		// this used to be else if
+		if((exit_now == false && TimerDiffSeconds(BTPadConnected[i]->timeout) >= 20 && BTPadConnected[i]->controller == C_NOT_SET)
+		|| (exit_now == false && TimerDiffSeconds(BTPadConnected[i]->timeout) >= 180 && BTPadConnected[i]->controller == C_NUN))
 		{
 			bte_disconnect(BTPadConnected[i]->sock);
+			
+			// reconnect virtual nunchuk if nothing is connected
+			forceNun = true;
+			nunTimer = 0;
+			
+			// avoid using since virtual nunchuk can exit with HOME + A
+			//exit_now = true;
 			break;
 		}
+	/*	else if(exit_now == true && (TimerDiffSeconds(BTPadConnected[i]->timeout) >= 4 && TimerDiffSeconds(BTPadConnected[i]->timeout) < 19))
+		{
+			//bte_disconnect(BTPadConnected[i]->sock);
+			write32(RESET_STATUS, 0x9DEA);
+			sync_after_write((void*)RESET_STATUS, 0x20);
+			exit_now = false;
+			break;
+		}*/
 		if(CurRumble == 0)
 		{
 			if(LastRumble == 1)
