@@ -301,10 +301,10 @@ static s32 BTHandleData(void *arg,void *buffer,u16 len)
 			sync_before_read(arg, sizeof(struct BTPadStat));
 		} */
 		
-		// activity check
-		if(BTPad[chan].button > 0)
-			stat->timeout = read32(HW_TIMER);
-			//dbgprintf("Pressed Wii btn TWO: 0x%X\n", BTPad[chan].button);
+		// activity check, not working
+		//if(BTPad[chan].button > 0)
+		//	stat->timeout = read32(HW_TIMER);
+		//	dbgprintf("Pressed Wii btn TWO: 0x%X\n", BTPad[chan].button);
 
 		BTPad[chan].used = stat->controller;
 		sync_after_write(&BTPad[chan], sizeof(struct BTPadCont));
@@ -819,6 +819,9 @@ void BTUpdateRegisters(void)
 				}
 			}
 		}
+		// SuSo: inactivity disconnect for wiimote
+		if(BTPad[i].button > 0)
+			BTPadConnected[i]->timeout = read32(HW_TIMER);
 		// this used to be else if
 		if((exit_now == false && TimerDiffSeconds(BTPadConnected[i]->timeout) >= 20 && BTPadConnected[i]->controller == C_NOT_SET)
 		|| (exit_now == false && TimerDiffSeconds(BTPadConnected[i]->timeout) >= 180 && BTPadConnected[i]->controller == C_NUN))
