@@ -431,7 +431,7 @@ void ISOSetupCache()
 		DCCache += 0x10000;
 		DCacheLimit -= 0x10000;
 		//triforce buffer is after cache
-		DCacheLimit -= 0x300000;
+	//	DCacheLimit -= 0x300000;
 	}
 	else
 	{
