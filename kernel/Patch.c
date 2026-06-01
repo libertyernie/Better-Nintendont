@@ -1375,13 +1375,13 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 		else if( (u32)Buffer == 0x01300000 && *(vu8*)Buffer == 0x48 )
 		{
 			// Save at reset, and reload the save after 5 secs
-			if( ConfigGetConfig(NIN_CFG_MEMCARDEMU) ) {
+		//	if( ConfigGetConfig(NIN_CFG_MEMCARDEMU) ) {
 				if(useAGB && AGB_Loaded) {
 					AGB_Save();
 					AGB_Loaded = false;
 					AGBTimer = read32(HW_TIMER);
 				}
-			}
+		//	}
 
 			GameEntry = 0x81300000;
 			DOLMinOff = P2C(GameEntry);
