@@ -221,9 +221,9 @@ static void app_loadgameconfig(u8 *tempgameconf, u32 tempgameconfsize)
 		return;
 
 	// initialize memory to 0
-	vu32* CCdirect = (vu32*)0x932F009C;
-	*CCdirect = 0;
-	DCFlushRange((void*)CCdirect, 0x4);
+	vu32* CCpatches = (vu32*)0x932F009C;
+	*CCpatches = 0;
+	DCFlushRange((void*)CCpatches, sizeof(vu32));
 
 	u32 ret;
 	s32 gameidmatch, maxgameidmatch = -1, maxgameidmatch2 = -1;
@@ -536,8 +536,32 @@ static void app_loadgameconfig(u8 *tempgameconf, u32 tempgameconfsize)
 							// Direct button mapping, less confusing
 							if(codeval > 0) {
 								//set mem2 bool
-								*CCdirect = 1;
-								DCFlushRange((void*)CCdirect, 0x4);
+								*CCpatches |= CC_PATCH_FUNCTION_DIRECT;
+								DCFlushRange((void*)CCpatches, sizeof(vu32));
+							}
+						}
+					}
+					if (strncasecmp("ccShoulderDirect", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 16)
+					{
+						ret = sscanf((char*)tempgameconf + i, "( %x ", (unsigned int*)&codeval);
+						if (ret == 1)
+						{
+							if (codeval > 0) {
+								//set mem2 bool
+								*CCpatches |= CC_PATCH_FUNCTION_SHOULDER_DIRECT;
+								DCFlushRange((void*)CCpatches, sizeof(vu32));
+							}
+						}
+					}
+					if (strncasecmp("ccDpadAsStick", parsebuffer, strlen(parsebuffer)) == 0 && strlen(parsebuffer) == 13)
+					{
+						ret = sscanf((char*)tempgameconf + i, "( %x ", (unsigned int*)&codeval);
+						if (ret == 1)
+						{
+							if (codeval > 0) {
+								//set mem2 bool
+								*CCpatches |= CC_PATCH_FUNCTION_DPAD_AS_STICK;
+								DCFlushRange((void*)CCpatches, sizeof(vu32));
 							}
 						}
 					}

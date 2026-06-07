@@ -65,7 +65,7 @@ static vu32* isSMC       = (vu32*)0x802AD6D0; //constant value to determine game
 //static u8 forcePlayer = 0; // invalid value, so it first picks a free slot
 static vu32* P1force = (vu32*)0x932F0094;
 static vu32* wiiPort = (vu32*)0x932F0098;
-static vu32* CCDirect = (vu32*)0x932F009C;
+static vu32* CCpatches = (vu32*)0x932F009C;
 
 static vu32* PADIsBarrel = (vu32*)0xD3003130;
 static vu32* PADBarrelEnabled = (vu32*)0xD3003140;
@@ -911,7 +911,8 @@ u32 _start(u32 calledByGame)
 
 		u16 button = 0;
 
-		if(BTPad[chan].used & C_CC)
+		if((BTPad[chan].used & C_CC)
+			|| ((BTPad[chan].used & C_CCP) && (*CCpatches & CC_PATCH_FUNCTION_DPAD_AS_STICK)))
 		{
 			Pad[chan].triggerLeft = BTPad[chan].triggerL;
 			if(BTPad[chan].button & BT_TRIGGER_L)
@@ -923,6 +924,12 @@ u32 _start(u32 calledByGame)
 
 			if(BTPad[chan].button & BT_TRIGGER_ZR)
 				button |= PAD_TRIGGER_Z;
+
+			if (BTPad[chan].used & C_CCP)
+			{
+				Pad[chan].triggerLeft = BTPad[chan].button & BT_TRIGGER_L ? 0xFF : 0;
+				Pad[chan].triggerRight = BTPad[chan].button & BT_TRIGGER_R ? 0xFF : 0;
+			}
 		}
 		else if(BTPad[chan].used & C_CCP)	//digital triggers
 		{
@@ -1562,7 +1569,7 @@ u32 _start(u32 calledByGame)
 		if(BTPad[chan].used & (C_CC | C_CCP))
 		{
 			// Input cannot be changed during gameplay, it's just bad design.
-			if(*CCDirect)
+			if(*CCpatches & CC_PATCH_FUNCTION_DIRECT)
 			{
 				if(BTPad[chan].button & BT_BUTTON_A)
 					button |= PAD_BUTTON_A;
@@ -1595,6 +1602,24 @@ u32 _start(u32 calledByGame)
 				button |= PAD_BUTTON_DOWN;
 			if(BTPad[chan].button & BT_DPAD_UP)
 				button |= PAD_BUTTON_UP;
+
+			if(*CCpatches & CC_PATCH_FUNCTION_DPAD_AS_STICK)
+			{
+				if(BTPad[chan].button & (BT_DPAD_LEFT | BT_DPAD_RIGHT | BT_DPAD_DOWN | BT_DPAD_UP))
+				{
+					button &= ~(PAD_BUTTON_LEFT | PAD_BUTTON_RIGHT | PAD_BUTTON_DOWN | PAD_BUTTON_UP);
+					Pad[chan].stickX = 0;
+					Pad[chan].stickY = 0;
+					if(BTPad[chan].button & BT_DPAD_UP)
+						Pad[chan].stickY = 0x7F;
+					if(BTPad[chan].button & BT_DPAD_DOWN)
+						Pad[chan].stickY = -0x7F;
+					if(BTPad[chan].button & BT_DPAD_LEFT)
+						Pad[chan].stickX = -0x7F;
+					if(BTPad[chan].button & BT_DPAD_RIGHT)
+						Pad[chan].stickX = 0x7F;
+				}
+			}
 			
 			if(BTPad[chan].button & BT_BUTTON_HOME)
 				goto DoExit;
