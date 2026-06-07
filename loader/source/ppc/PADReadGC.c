@@ -912,7 +912,7 @@ u32 _start(u32 calledByGame)
 		u16 button = 0;
 
 		if((BTPad[chan].used & C_CC)
-			|| ((BTPad[chan].used & C_CCP) && (*CCpatches & CC_PATCH_FUNCTION_DPAD_AS_STICK)))
+			|| ((BTPad[chan].used & C_CCP) && (*CCpatches & CC_PATCH_FUNCTION_SHOULDER_DIRECT)))
 		{
 			Pad[chan].triggerLeft = BTPad[chan].triggerL;
 			if(BTPad[chan].button & BT_TRIGGER_L)
