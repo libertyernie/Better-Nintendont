@@ -10,6 +10,8 @@
 #define STRINGIZE(s) STRINGIZE2(s)
 #define NIN_VERSION_STRING "$$Version:" STRINGIZE(NIN_MAJOR_VERSION) "." STRINGIZE(NIN_MINOR_VERSION)
 
+#define NO_EXIT	1
+
 // "Special" version.
 // This should only be set in custom builds, i.e. not mainline.
 //#define NIN_SPECIAL_VERSION			"-MChax3"

@@ -4,10 +4,9 @@ A fork of https://github.com/SuperrSonic/Better-Nintendont.
 
 Additional features:
 
-[ ] New patch.txt function `ccShoulderDirect`: maps the Classic Controller Pro buttons the same way as the normal Classic Controller buttons (adjusting for lack of analog input or L/R by forcing full presses)
-[ ] New patch.txt function `ccDpadAsStick`: unmaps the Classic Controller / Classic Controller Pro D-pad and maps it to the left analog stick instead
-[ ] New preprocessor directive SHUTDOWN_INSTEAD_OF_EXIT that shuts down the Wii instead of attempting to exit the game (a workaround if exit-to-home does not work in a custom build)
-[ ] Unmapping the Classic Controller home button
+* [ ] New patch.txt function `ccShoulderDirect`: maps the Classic Controller Pro buttons the same way as the normal Classic Controller buttons (adjusting for lack of analog input or L/R by forcing full presses)
+* [ ] New patch.txt function `ccDpadAsStick`: unmaps the Classic Controller / Classic Controller Pro D-pad and maps it to the left analog stick instead
+* [x] New preprocessor flag `NO_EXIT` (defined in NintendontVersion.h): prevents exiting the game (to avoid crashes on certain custom builds) - power button shus down the console
 
 <details>
 <summary>Original README</summary>

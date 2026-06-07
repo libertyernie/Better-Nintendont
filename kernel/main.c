@@ -746,6 +746,13 @@ int _main( int argc, char *argv[] )
 		}*/
 		if(reset_status == 0x7DEA || (read32(HW_GPIO_IN) & GPIO_POWER))
 		{
+#ifdef NO_EXIT
+			DIFinishAsync();
+			#ifdef PATCHALL
+			BTE_Shutdown();
+			#endif
+			Shutdown();
+#else
 			if(ConfigGetConfig(NIN_CFG_NATIVE_SI)) {
 				DIFinishAsync();
 				//#ifdef PATCHALL
@@ -761,6 +768,7 @@ int _main( int argc, char *argv[] )
 				reboot_now = true;
 				Reboot = read32(HW_TIMER);
 			}
+#endif
 		}
 		#ifdef USE_OSREPORTDM
 		sync_before_read( (void*)0x1860, 0x20 );

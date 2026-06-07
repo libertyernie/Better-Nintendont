@@ -1667,6 +1667,7 @@ u32 _start(u32 calledByGame)
 	return Rumble;
 //3400FFFC = start of exit
 DoExit:
+#ifndef NO_EXIT
 	/* disable interrupts */
 	asm volatile("mfmsr 3 ; rlwinm 3,3,0,17,15 ; mtmsr 3");
 	/* stop audio dma */
@@ -1693,11 +1694,12 @@ DoExit:
 		"mtlr %r3\n"
 		"blr\n"
 	);
+#endif
 	return 0;
 #if 0
 DoShutdown:
 	/* disable interrupts */
-	asm volatile("mfmsr 3 ; rlwinm 3,3,0,17,15 ; mtmsr 3");
+asm volatile("mfmsr 3 ; rlwinm 3,3,0,17,15 ; mtmsr 3");
 	/* stop audio dma */
 	_dspReg[27] = (_dspReg[27]&~0x8000);
 	/* reset status 7 (DoShutdown) */

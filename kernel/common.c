@@ -150,10 +150,12 @@ void Shutdown( void )
 	if( ConfigGetConfig(NIN_CFG_MEMCARDEMU) )
 		EXIShutdown();
 	
+#ifndef NO_EXIT
 	if(IsWiiU())
 		write32( 0x0D8005E0, 0xFFFFFFFE );
 
 	write32( HW_RESETS, (read32( HW_RESETS ) | 0x20 ) & (~1) );
+#endif
 
 #if 0
 
