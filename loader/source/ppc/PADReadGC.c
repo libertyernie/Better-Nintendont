@@ -911,8 +911,7 @@ u32 _start(u32 calledByGame)
 
 		u16 button = 0;
 
-		if((BTPad[chan].used & C_CC)
-			|| ((BTPad[chan].used & C_CCP) && (*CCpatches & CC_PATCH_FUNCTION_SHOULDER_DIRECT)))
+		if(BTPad[chan].used & C_CC)
 		{
 			Pad[chan].triggerLeft = BTPad[chan].triggerL;
 			if(BTPad[chan].button & BT_TRIGGER_L)
@@ -924,18 +923,25 @@ u32 _start(u32 calledByGame)
 
 			if(BTPad[chan].button & BT_TRIGGER_ZR)
 				button |= PAD_TRIGGER_Z;
-
-			if (BTPad[chan].used & C_CCP)
-			{
-				Pad[chan].triggerLeft = BTPad[chan].button & BT_TRIGGER_L ? 0xFF : 0;
-				Pad[chan].triggerRight = BTPad[chan].button & BT_TRIGGER_R ? 0xFF : 0;
-			}
 		}
 		else if(BTPad[chan].used & C_CCP)	//digital triggers
 		{
-			if(BTPad[chan].button & BT_TRIGGER_ZL)
+			int leftTrigger = BTPad[chan].button & BT_TRIGGER_ZL;
+			int rightTrigger = BTPad[chan].button & BT_TRIGGER_ZR;
+			int bumper = BTPad[chan].button & BT_TRIGGER_R;
+			int intensityModifier = BTPad[chan].button & BT_TRIGGER_L;
+
+			if(*CCpatches & CC_PATCH_FUNCTION_SHOULDER_DIRECT)
 			{
-				if(BTPad[chan].button & BT_TRIGGER_L)
+				leftTrigger = BTPad[chan].button & BT_TRIGGER_L;
+				rightTrigger = BTPad[chan].button & BT_TRIGGER_R;
+				bumper = BTPad[chan].button & BT_TRIGGER_ZR;
+				intensityModifier = BTPad[chan].button & BT_TRIGGER_ZL;
+			}
+
+			if(BTPad[chan].button & leftTrigger)
+			{
+				if(BTPad[chan].button & intensityModifier)
 					Pad[chan].triggerLeft = 0x7F;
 				else
 				{
@@ -946,9 +952,9 @@ u32 _start(u32 calledByGame)
 			else
 				Pad[chan].triggerLeft = 0;
 
-			if(BTPad[chan].button & BT_TRIGGER_ZR)
+			if(BTPad[chan].button & rightTrigger)
 			{
-				if(BTPad[chan].button & BT_TRIGGER_L)
+				if(BTPad[chan].button & intensityModifier)
 					Pad[chan].triggerRight = 0x7F;
 				else
 				{
@@ -959,7 +965,7 @@ u32 _start(u32 calledByGame)
 			else
 				Pad[chan].triggerRight = 0;
 
-			if(BTPad[chan].button & BT_TRIGGER_R)
+			if(BTPad[chan].button & bumper)
 				button |= PAD_TRIGGER_Z;
 		}
 		
