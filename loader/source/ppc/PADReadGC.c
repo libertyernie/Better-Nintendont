@@ -1562,7 +1562,7 @@ u32 _start(u32 calledByGame)
 		if(BTPad[chan].used & (C_CC | C_CCP))
 		{
 			// Input cannot be changed during gameplay, it's just bad design.
-			if(*CCDirect == 1)
+			if(*CCDirect)
 			{
 				if(BTPad[chan].button & BT_BUTTON_A)
 					button |= PAD_BUTTON_A;
