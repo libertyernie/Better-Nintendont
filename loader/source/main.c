@@ -531,8 +531,9 @@ static void app_loadgameconfig(u8 *tempgameconf, u32 tempgameconfsize)
 							// Direct button mapping, less confusing
 							if(codeval > 0) {
 								//set mem2 bool
-								vu32* CCdirect = (vu32*)0x93003074;
+								vu32* CCdirect = (vu32*)0x932F009C;
 								*CCdirect = 1;
+								DCFlushRange((void*)0x932F009C, 0x4);
 							}
 						}
 					}
