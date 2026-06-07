@@ -4,9 +4,8 @@ A fork of https://github.com/SuperrSonic/Better-Nintendont.
 
 Additional features:
 
-* New patch.txt function `ccShoulderDirect`: maps the Classic Controller Pro
-  buttons the same way as the normal Classic Controller buttons (adjusting for
-  lack of analog input or L/R by forcing full presses)
+* New patch.txt function `ccShoulderDirect`: swaps the Classic Controller Pro
+  shoulder button mappings so Wii L and R buttons are mapped to GCN L and R
 * New patch.txt function `ccDpadAsStick`: unmaps the Classic Controller /
   Classic Controller Pro D-pad and maps it to the left analog stick instead
 * New preprocessor flag `NO_EXIT` (defined in NintendontVersion.h): prevents
